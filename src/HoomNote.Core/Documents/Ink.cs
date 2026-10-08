@@ -7,6 +7,13 @@ public enum InkToolKind
     Highlighter
 }
 
+public enum InkLinePattern
+{
+    Solid,
+    Dotted,
+    Dashed
+}
+
 // Samples are immutable values, not identity-bearing objects. Keeping them inline in List<T>
 // removes one managed object plus one reference per sample (hundreds of thousands on imported
 // pages), substantially lowering GC pressure and improving sequential geometry traversal.
@@ -66,6 +73,7 @@ public sealed record InkStyle
     public const float HighlighterCompositingStrength = 0.76f;
 
     public InkToolKind Tool { get; init; } = InkToolKind.Pen;
+    public InkLinePattern LinePattern { get; init; }
     public string Color { get; init; } = "#111111";
     public float Width { get; init; } = 2.4f;
     public float Opacity { get; init; } = 1f;
@@ -76,6 +84,7 @@ public sealed record InkStyle
 
     public InkStyle Normalize() => this with
     {
+        LinePattern = Enum.IsDefined(LinePattern) ? LinePattern : InkLinePattern.Solid,
         Width = Math.Clamp(float.IsFinite(Width) ? Width : 2.4f, 0.1f, 96f),
         // Pen and pencil are opaque pigments. Alpha accumulation changes their selected color
         // wherever strokes overlap; only the highlighter intentionally uses translucent ink.

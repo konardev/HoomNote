@@ -15,6 +15,7 @@ public static class InkBatchPolicy
             maximumSourcePoints < 2 || objects[start] is not InkStrokeObject first ||
             first.IsHidden || first.Points.Count < 2 ||
             first.Style.Tool == InkToolKind.Highlighter ||
+            first.Style.Normalize().LinePattern != InkLinePattern.Solid ||
             first.Points.Count > maximumSourcePoints)
             return 0;
 

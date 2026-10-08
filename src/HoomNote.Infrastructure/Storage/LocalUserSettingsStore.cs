@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
+using HoomNote.Core.Documents;
 using HoomNote.Infrastructure.Serialization;
 
 namespace HoomNote.Infrastructure.Storage;
@@ -11,6 +12,8 @@ public sealed record UserPreferences
     public int Version { get; init; } = CurrentVersion;
     public List<string> SavedInkColors { get; init; } = ["#111111"];
     public string PenColor { get; init; } = "#111111";
+    public InkLinePattern PenLinePattern { get; init; }
+    public InkLinePattern HighlighterLinePattern { get; init; }
     public string HighlighterColor { get; init; } = "#FFFF00";
     public bool HighlighterStraightLine { get; init; }
     public bool SmartShapes { get; init; } = true;
@@ -34,6 +37,7 @@ public sealed record UserPreferences
 
 public sealed record ToolbarPresetPreference
 {
+    public InkLinePattern LinePattern { get; init; }
     public Guid Id { get; init; } = Guid.NewGuid();
     public string Tool { get; init; } = "Pen";
     public string Color { get; init; } = "#111111";

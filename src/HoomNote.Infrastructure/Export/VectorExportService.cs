@@ -13,6 +13,10 @@ public sealed class VectorExportService(IAssetStore assetStore) : IVectorExportS
 {
     private const double PointsPerDip = 72d / 96d;
 
+    private static IEnumerable<CanvasObject> ExpandInk(CanvasObject item) => item is InkStrokeObject stroke
+        ? InkPatternGeometry.Expand(stroke)
+        : [item];
+
     public Task<ExportResult> ExportAsync(HoomNoteDocument document, string destinationPath,
         VectorExportFormat format, CancellationToken cancellationToken = default) => format switch
     {
@@ -35,7 +39,7 @@ public sealed class VectorExportService(IAssetStore assetStore) : IVectorExportS
             using var graphics = XGraphics.FromPdfPage(page);
             DrawPdfTemplate(graphics, notePage);
             DrawImportedPdfPage(graphics, notePage, warnings);
-            foreach (var canvasObject in notePage.Objects.Where(item => !item.IsHidden).OrderBy(item => item.ZIndex))
+            foreach (var canvasObject in notePage.Objects.Where(item => !item.IsHidden).OrderBy(item => item.ZIndex).SelectMany(ExpandInk))
                 DrawPdfObject(graphics, canvasObject, warnings);
         }
 
@@ -253,7 +257,7 @@ public sealed class VectorExportService(IAssetStore assetStore) : IVectorExportS
         if (page.ImportedLayer is not null)
             warnings.Add($"SVG export does not embed imported PDF page {page.ImportedLayer.SourcePageIndex + 1}; HoomNote vector overlays were preserved.");
 
-        foreach (var canvasObject in page.Objects.Where(item => !item.IsHidden).OrderBy(item => item.ZIndex))
+        foreach (var canvasObject in page.Objects.Where(item => !item.IsHidden).OrderBy(item => item.ZIndex).SelectMany(ExpandInk))
         {
             cancellationToken.ThrowIfCancellationRequested();
             var matrix = canvasObject.Transform;

@@ -1,10 +1,4 @@
-# HoomNote 0.8.5
+# HoomNote 0.8.6
 
-- Fixed copying notebook objects failing before they reached the clipboard. Selected handwriting, images, shapes, and typed text can now be copied and pasted within HoomNote.
-- Fixed the internal clipboard fallback after a failed Windows clipboard write. Copies remain available across notebook tabs and windows until the system clipboard changes.
-- Made copied content persist after HoomNote exits when Windows accepts the clipboard flush.
-- Made pasting multiple objects a single undo and redo action.
-- Prevented delayed text and object paste from inserting into a different page after navigation.
-- Added a visible message when copied object data cannot be read.
-
-Existing Samsung imports must be reimported to correct previously saved image associations. Keep the previous notebook if it contains edits made after import.
+- Added Crop to the image right-click menu. Adjust the crop bars directly on the canvas, then confirm with the checkmark in place of the lock button. Cancel and undo/redo are supported.
+- Added Solid, Dotted, and Dashed line styles to pen and highlighter options. Styles are saved with notes and pen presets and retained in thumbnails and PDF/SVG exports.

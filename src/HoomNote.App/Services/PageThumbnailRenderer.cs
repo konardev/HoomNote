@@ -204,6 +204,15 @@ public sealed class PageThumbnailRenderer(IAssetStore assetStore, SharedPdfDocum
         CancellationToken cancellationToken)
     {
         if (stroke.Points.Count == 0) return;
+        if (stroke.Style.Normalize().LinePattern != InkLinePattern.Solid)
+        {
+            foreach (var part in InkPatternGeometry.Expand(stroke))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                DrawInk(session, part, roundStyle, darkSurface, renderScale, cancellationToken);
+            }
+            return;
+        }
         var style = stroke.Style.Normalize();
         using var blend = ConfigureInkBlend(session, style, darkSurface, out var color);
         if (StrokeOutlineBuilder.UsesCenterlineStroke(stroke))

@@ -860,7 +860,9 @@ public sealed partial class MainPage : Page
         }
         try
         {
-            var root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HoomNote");
+            var root = Environment.GetEnvironmentVariable("HOOMNOTE_DATA_DIR");
+            if (string.IsNullOrWhiteSpace(root))
+                root = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "HoomNote");
             Directory.CreateDirectory(root);
             _userSettingsStore = new LocalUserSettingsStore(Path.Combine(root, "settings.json"));
             _userPreferences = await App.LoadSharedUserPreferencesAsync(_userSettingsStore);
@@ -892,6 +894,7 @@ public sealed partial class MainPage : Page
                 await App.SaveSharedUserPreferencesAsync(_userSettingsStore, _userPreferences);
             _penColor = IsValidHexColor(_userPreferences.PenColor) ? _userPreferences.PenColor.ToUpperInvariant() : "#111111";
             _highlighterColor = IsValidHexColor(_userPreferences.HighlighterColor) ? _userPreferences.HighlighterColor.ToUpperInvariant() : "#FFFF00";
+            SyncInkLinePatternPicker();
             HighlighterStraightCheckBox.IsChecked = _userPreferences.HighlighterStraightLine;
             SmartShapesToggle.IsOn = _userPreferences.SmartShapes;
             _expandedFolderIds.Clear();
@@ -1971,6 +1974,7 @@ public sealed partial class MainPage : Page
         _canvasCutMenuItem = AddMenuItem(_canvasContextMenu, "Cut", "\uE8C6", OnCanvasCutContextClick);
         _canvasCopyMenuItem = AddMenuItem(_canvasContextMenu, "Copy", "\uE8B0", OnCanvasCopyContextClick);
         _canvasPasteMenuItem = AddMenuItem(_canvasContextMenu, "Paste here", "\uE77F", OnCanvasPasteContextClick);
+        _canvasCropMenuItem = AddMenuItem(_canvasContextMenu, "Crop", "\uE7A8", OnCanvasCropClick);
     }
 
     private static MenuFlyoutItem AddMenuItem(MenuFlyout flyout, string text, string glyph,
@@ -2028,6 +2032,7 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasRightTapped(object sender, RightTappedRoutedEventArgs e)
     {
+        if (_imageCrop is not null) { e.Handled = true; return; }
         if (_readMode || _page is null) return;
         var screenPoint = e.GetPosition(DrawingSurface);
         if (TryResolveVisiblePageAt(screenPoint, out var targetPage, out var targetBounds) &&
@@ -2045,6 +2050,9 @@ public sealed partial class MainPage : Page
         _canvasCutMenuItem.IsEnabled = hasSelection;
         _canvasCopyMenuItem.IsEnabled = hasSelection;
         _canvasPasteMenuItem.IsEnabled = ClipboardMayContainPasteData();
+        _cropContextImage = hit as ImageObject;
+        _canvasCropMenuItem.Visibility = _cropContextImage is null ? Visibility.Collapsed : Visibility.Visible;
+        _canvasCropMenuItem.IsEnabled = _cropContextImage is { IsLocked: false };
         _canvasContextMenu.ShowAt(DrawingSurface, screenPoint);
         e.Handled = true;
     }
@@ -2901,6 +2909,7 @@ public sealed partial class MainPage : Page
 
     private void ClearCurrentNotebook(Guid documentId)
     {
+        CancelImageCrop();
         ResetNotebookPagePreviews();
         _document = null;
         _page = null;
@@ -3011,6 +3020,7 @@ public sealed partial class MainPage : Page
 
     private void SelectPage(NotePage? page)
     {
+        CancelImageCrop();
         _navigationSettleTimer.Stop();
         _zoomNavigationActive = false;
         _wheelZoomAnimating = false;
@@ -3892,7 +3902,9 @@ public sealed partial class MainPage : Page
         DrawSearchFlash(drawingSession);
         DrawTextSelection(drawingSession);
 
-        if (_selectedObjects.Count > 1)
+        if (_imageCrop is { } crop)
+            DrawImageCrop(drawingSession, crop);
+        else if (_selectedObjects.Count > 1)
             DrawSelectionBounds(drawingSession, CombinedSelectionBounds());
         else if (_selectedObject is not null)
         {
@@ -4844,6 +4856,14 @@ public sealed partial class MainPage : Page
     private void DrawLiveInk(CanvasDrawingSession drawingSession)
     {
         var style = (_gestureInkStyle ?? CurrentInkStyle()).Normalize();
+        if (style.LinePattern != InkLinePattern.Solid)
+        {
+            var points = _gestureTool == EditorTool.Highlighter && HighlighterStraightCheckBox.IsChecked == true && _activeInk.Count > 1
+                ? new List<InkPoint> { _activeInk[0], SnapHighlighterEnd(_activeInk[0], _activeInk[^1]) }
+                : _activeInk;
+            DrawInk(drawingSession, new InkStrokeObject { Points = points, Style = style });
+            return;
+        }
         using var blend = ConfigureInkBlend(
             drawingSession, style, IsDarkColor(_page?.Template.PaperColor ?? "#FFFDF8"), out var color);
         var width = style.Width;
@@ -4888,7 +4908,7 @@ public sealed partial class MainPage : Page
     {
         if (_activeInk.Count < 2 || _gestureTool != EditorTool.Pen) return;
         var style = (_gestureInkStyle ?? CurrentInkStyle()).Normalize();
-        if (style.Tool != InkToolKind.Pen || style.Opacity < 0.995f) return;
+        if (style.Tool != InkToolKind.Pen || style.Opacity < 0.995f || style.LinePattern != InkLinePattern.Solid) return;
         var previous = _activeInk[^2];
         var latest = _activeInk[^1];
         var delta = latest.Position.ToVector2() - previous.Position.ToVector2();
@@ -5354,6 +5374,15 @@ public sealed partial class MainPage : Page
         double? renderScale = null)
     {
         if (stroke.Points.Count == 0) return;
+        if (stroke.Style.Normalize().LinePattern != InkLinePattern.Solid)
+        {
+            foreach (var part in InkPatternGeometry.Expand(stroke))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                DrawInk(drawingSession, part, false, cancellationToken, renderScale);
+            }
+            return;
+        }
         var effectiveRenderScale = Math.Clamp(renderScale ?? _zoom, 1d / 16d, 8d);
         var normalizedStyle = stroke.Style.Normalize();
         using var blend = ConfigureInkBlend(
@@ -5805,6 +5834,7 @@ public sealed partial class MainPage : Page
             e.Handled = true;
             return;
         }
+        if (TryStartCropDrag(e)) return;
         if (IsTouchNavigationPointer(e, point))
         {
             // If a driver reports both the raw Touch pointer and its generated Mouse promotion,
@@ -5994,6 +6024,7 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasPointerMoved(object sender, PointerRoutedEventArgs e)
     {
+        if (TryMoveCropDrag(e)) return;
         var current = e.GetCurrentPoint(DrawingSurface);
         _lastCanvasPointerPosition = current.Position;
         if (IsTouchNavigationPointer(e, current))
@@ -6071,6 +6102,7 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasPointerReleased(object sender, PointerRoutedEventArgs e)
     {
+        if (TryEndCropDrag(e)) return;
         var current = e.GetCurrentPoint(DrawingSurface);
         if (IsTouchNavigationPointer(e, current))
         {
@@ -6220,6 +6252,7 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasPointerCanceled(object sender, PointerRoutedEventArgs e)
     {
+        if (TryEndCropDrag(e, canceled: true)) return;
         var current = e.GetCurrentPoint(DrawingSurface);
         if (IsTouchNavigationPointer(e, current))
         {
@@ -6243,6 +6276,7 @@ public sealed partial class MainPage : Page
 
     private void OnCanvasPointerCaptureLost(object sender, PointerRoutedEventArgs e)
     {
+        if (TryEndCropDrag(e, canceled: true)) return;
         var current = e.GetCurrentPoint(DrawingSurface);
         if (IsTouchNavigationPointer(e, current))
         {
@@ -6403,6 +6437,7 @@ public sealed partial class MainPage : Page
     {
         _ = sender;
         _lastNativeTouchTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (_imageCrop is not null) { HandleNativeCropFrame(e); return; }
         if (_page is null || _penActive || _isPointerDown || e.Contacts.Count == 0) return;
 
         var canvasOrigin = DrawingSurface.TransformToVisual(null)
@@ -7478,6 +7513,7 @@ public sealed partial class MainPage : Page
     private void OnShapeSnapTimerTick(DispatcherQueueTimer sender, object args)
     {
         if (!_isPointerDown || _gestureTool != EditorTool.Pen || !SmartShapesToggle.IsOn ||
+            (_gestureInkStyle ?? CurrentInkStyle()).LinePattern != InkLinePattern.Solid ||
             _activeInk.Count < 4)
         {
             if (!_isPointerDown || _gestureTool != EditorTool.Pen || !SmartShapesToggle.IsOn)
@@ -7497,6 +7533,7 @@ public sealed partial class MainPage : Page
     {
         if (_document is null || _page is null || _activeInk.Count == 0) return;
         if (_gestureTool == EditorTool.Pen && SmartShapesToggle.IsOn &&
+            (_gestureInkStyle ?? CurrentInkStyle()).LinePattern == InkLinePattern.Solid &&
             (_heldShapeRecognition ?? ShapeRecognizer.RecognizeDetailed(
                 _activeInk, deliberateShapeGesture, snapToClosest: deliberateShapeGesture)) is { } recognition)
         {
@@ -7822,6 +7859,7 @@ public sealed partial class MainPage : Page
 
     private void SelectSingleObject(CanvasObject canvasObject)
     {
+        if (!ReferenceEquals(_imageCrop?.Image, canvasObject)) CancelImageCrop();
         ClearTextSelection();
         _selectedObject = canvasObject;
         _selectedObjects.Clear();
@@ -8845,6 +8883,7 @@ public sealed partial class MainPage : Page
 
     private void ActivateTool(EditorTool tool, ToggleButton? selected = null)
     {
+        CancelImageCrop();
         if (!_applyingToolbarPreset) SetActiveToolbarPreset(null);
         _presetOpacity = null;
         _presetSmoothing = null;
@@ -8862,6 +8901,7 @@ public sealed partial class MainPage : Page
         QuickInkSettingsTitle.Text = _colorTool == EditorTool.Highlighter
             ? "Highlighter settings"
             : "Pen settings";
+        SyncInkLinePatternPicker();
         HighlighterStraightCheckBox.Visibility = _colorTool == EditorTool.Highlighter
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -9435,6 +9475,7 @@ public sealed partial class MainPage : Page
 
     private void SetReadMode(bool enabled)
     {
+        CancelImageCrop();
         if (enabled == _readMode || enabled && _page is null) return;
         foreach (var animation in _sidebarAnimations.Values.ToArray()) animation.Cancel();
         if (enabled)
@@ -9521,6 +9562,16 @@ public sealed partial class MainPage : Page
 
     private async void OnGlobalKeyDown(object sender, KeyRoutedEventArgs args)
     {
+        if (_imageCrop is not null)
+        {
+            if (args.Key == VirtualKey.Escape ||
+                args.Key == VirtualKey.Enter && ReferenceEquals(FocusManager.GetFocusedElement(XamlRoot), SelectionCropCancelButton))
+                CancelImageCrop();
+            else if (args.Key == VirtualKey.Enter) await ConfirmImageCropAsync();
+            // Keep Tab available for the confirm/cancel controls; suppress document edits.
+            args.Handled = args.Key is not VirtualKey.Tab and not VirtualKey.Space;
+            return;
+        }
         if (ShortcutTargetsTextInput()) return;
         var controlDown = IsControlDown();
         if (controlDown && args.Key == VirtualKey.S)
@@ -9730,6 +9781,7 @@ public sealed partial class MainPage : Page
             PressureSensitivity = 0,
             Opacity = style.Opacity,
             Smoothing = style.Smoothing,
+            LinePattern = CurrentLinePattern(tool),
             StraightLine = tool == EditorTool.Highlighter && HighlighterStraightCheckBox.IsChecked == true
         });
         RebuildPresetToolbar();
@@ -9987,6 +10039,7 @@ public sealed partial class MainPage : Page
             _presetSmoothing = (float)Math.Clamp(preset.Smoothing, 0, 1);
             SetInkColor(preset.Color);
             SetInkWidth(preset.Width);
+            SetInkLinePattern(preset.LinePattern);
             if (tool == EditorTool.Highlighter) HighlighterStraightCheckBox.IsChecked = preset.StraightLine;
         }
         finally
@@ -10067,6 +10120,7 @@ public sealed partial class MainPage : Page
 
     private void OnUndoClick(object sender, RoutedEventArgs e)
     {
+        if (_imageCrop is not null) { CancelImageCrop(); return; }
         if (_document is null) return;
         var pageIds = _document.Pages.Select(page => page.Id).ToArray();
         if (!_history.Undo(_document)) return;
@@ -10087,6 +10141,7 @@ public sealed partial class MainPage : Page
 
     private void OnRedoClick(object sender, RoutedEventArgs e)
     {
+        CancelImageCrop();
         if (_document is null) return;
         var pageIds = _document.Pages.Select(page => page.Id).ToArray();
         if (!_history.Redo(_document)) return;
@@ -10267,8 +10322,9 @@ public sealed partial class MainPage : Page
         ActivateTool(EditorTool.Select);
     }
 
-    private void OnSelectionLockClick(object sender, RoutedEventArgs e)
+    private async void OnSelectionLockClick(object sender, RoutedEventArgs e)
     {
+        if (_imageCrop is not null) { await ConfirmImageCropAsync(); return; }
         if (_document is null || _page is null || _selectedObject is not { } selected ||
             selected is not ImageObject and not ShapeObject) return;
         var updated = selected with { IsLocked = !selected.IsLocked };
@@ -11648,6 +11704,7 @@ public sealed partial class MainPage : Page
                 Color = _highlighterColor,
                 Width = Math.Max(12, (float)StrokeWidthSlider.Value * 3),
                 Opacity = _presetOpacity ?? InkStyle.DefaultHighlighterOpacity,
+                LinePattern = CurrentLinePattern(EditorTool.Highlighter),
                 PressureEnabled = false,
                 PressureSensitivity = 0,
                 Smoothing = _presetSmoothing ?? 0.8f
@@ -11655,6 +11712,7 @@ public sealed partial class MainPage : Page
             _ => new InkStyle
             {
                 Tool = InkToolKind.Pen, Color = _penColor, Width = (float)StrokeWidthSlider.Value,
+                LinePattern = CurrentLinePattern(EditorTool.Pen),
                 Opacity = _presetOpacity ?? 1f, PressureEnabled = false, PressureSensitivity = 0,
                 Smoothing = _presetSmoothing ?? 0.9f
             }
@@ -12602,6 +12660,13 @@ public sealed partial class MainPage : Page
 
     private void UpdateSelectionLockOverlay()
     {
+        if (_imageCrop is { } pending && (_readMode || !ReferenceEquals(pending.Image, _selectedObject) ||
+            _page is null || !_page.Objects.Any(item => ReferenceEquals(item, pending.Image))))
+            CancelImageCrop();
+        SelectionCropCancelButton.Visibility = _imageCrop is null ? Visibility.Collapsed : Visibility.Visible;
+        SelectionCropConfirmIcon.Visibility = _imageCrop is null ? Visibility.Collapsed : Visibility.Visible;
+        SelectionLockOverlayButton.IsEnabled = !_applyingImageCrop;
+        SelectionLockButton.IsEnabled = !_applyingImageCrop;
         if (_readMode || _selectedObject is not { } selected ||
             selected is not ImageObject and not ShapeObject || _page is null)
         {
@@ -12612,25 +12677,35 @@ public sealed partial class MainPage : Page
         var positionedSelection = _transformPreview is ImageObject or ShapeObject
             ? _transformPreview
             : selected;
-        var bounds = StrokeGeometry.GetWorldBounds(positionedSelection);
+        var bounds = _imageCrop is { } crop
+            ? RectD.FromPoints(crop.Bounds.Corners().Select(crop.Image.Transform.Apply))
+            : StrokeGeometry.GetWorldBounds(positionedSelection);
         var anchor = PageToScreen(new PointD(bounds.Right, bounds.Top));
         var left = Math.Clamp(anchor.X + 8, 4, Math.Max(4, DrawingSurface.ActualWidth - 40));
-        var top = Math.Clamp(anchor.Y - 18, 4, Math.Max(4, DrawingSurface.ActualHeight - 40));
+        var top = Math.Clamp(anchor.Y - 18, 4, Math.Max(4, DrawingSurface.ActualHeight - (_imageCrop is null ? 40 : 82)));
         if (double.IsNaN(Canvas.GetLeft(SelectionLockOverlayButton)) ||
             Math.Abs(Canvas.GetLeft(SelectionLockOverlayButton) - left) > 0.25)
             Canvas.SetLeft(SelectionLockOverlayButton, left);
         if (double.IsNaN(Canvas.GetTop(SelectionLockOverlayButton)) ||
             Math.Abs(Canvas.GetTop(SelectionLockOverlayButton) - top) > 0.25)
             Canvas.SetTop(SelectionLockOverlayButton, top);
-        SelectionLockedOverlayIcon.Visibility = selected.IsLocked
+        SelectionLockedOverlayIcon.Visibility = _imageCrop is null && selected.IsLocked
             ? Visibility.Visible
             : Visibility.Collapsed;
-        SelectionUnlockedOverlayIcon.Visibility = selected.IsLocked
+        SelectionUnlockedOverlayIcon.Visibility = _imageCrop is not null || selected.IsLocked
             ? Visibility.Collapsed
             : Visibility.Visible;
         var objectName = selected is ShapeObject ? "Shape" : "Image";
+        if (_imageCrop is not null)
+        {
+            Canvas.SetLeft(SelectionCropCancelButton, left);
+            Canvas.SetTop(SelectionCropCancelButton, Math.Clamp(top + 42, 4, Math.Max(4, DrawingSurface.ActualHeight - 40)));
+            SelectionLockButton.Content = "Confirm crop";
+        }
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(SelectionLockOverlayButton,
+            _imageCrop is not null ? "Confirm crop" : selected.IsLocked ? "Unlock image or shape" : "Lock image or shape");
         UpdateTransientToolTip(SelectionLockOverlayButton,
-            selected.IsLocked
+            _imageCrop is not null ? "Confirm crop (Enter)" : selected.IsLocked
                 ? $"{objectName} is locked • click to unlock"
                 : $"{objectName} is unlocked • click to lock");
         if (SelectionLockOverlayButton.Visibility != Visibility.Visible)

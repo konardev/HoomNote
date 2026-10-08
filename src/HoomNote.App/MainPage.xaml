@@ -296,6 +296,13 @@
                                                Text="Size changes save automatically to the selected preset."
                                                Visibility="Collapsed" FontSize="10" TextWrapping="Wrap"
                                                Foreground="{StaticResource HoomNoteAccentBrush}" />
+                                    <ComboBox x:Name="InkLinePatternPicker" Header="Line style"
+                                              HorizontalAlignment="Stretch" SelectedIndex="0"
+                                              SelectionChanged="OnInkLinePatternChanged">
+                                        <ComboBoxItem Content="Solid" />
+                                        <ComboBoxItem Content="Dotted" />
+                                        <ComboBoxItem Content="Dashed" />
+                                    </ComboBox>
                                     <TextBlock Text="Color" FontSize="12"
                                                Foreground="{StaticResource HoomNoteMutedTextBrush}" />
                                     <ColorPicker x:Name="QuickInkColorPicker" IsAlphaEnabled="False"
@@ -637,7 +644,14 @@
                                       Visibility="Collapsed" />
                             <PathIcon x:Name="SelectionUnlockedOverlayIcon"
                                       Data="{StaticResource IconUnlock}" />
+                            <FontIcon x:Name="SelectionCropConfirmIcon" Glyph="&#xE73E;" Visibility="Collapsed" />
                         </Grid>
+                    </Button>
+                    <Button x:Name="SelectionCropCancelButton" Width="36" Height="36" Padding="0"
+                            Visibility="Collapsed" Click="OnCancelImageCropClick" CornerRadius="18"
+                            Background="#E61A1C20" Foreground="#FFFFFFFF" BorderBrush="#BFFFFFFF" BorderThickness="1"
+                            AutomationProperties.Name="Cancel crop" ToolTipService.ToolTip="Cancel crop (Escape)">
+                        <FontIcon Glyph="&#xE711;" />
                     </Button>
                 </Canvas>
                 <Border x:Name="ZoomIndicator" HorizontalAlignment="Center" VerticalAlignment="Top"
