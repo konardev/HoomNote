@@ -50,6 +50,11 @@ public sealed class ContentAddressedAssetStore : IAssetStore
             catch (IOException) when (File.Exists(finalPath))
             {
                 File.Delete(temporaryPath);
+                // Re-adding a stored asset makes it recent again, so a garbage-collection sweep
+                // that started before this reference was saved keeps it.
+                try { File.SetLastWriteTimeUtc(finalPath, DateTime.UtcNow); }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
             return hash + extension;
         }
@@ -80,7 +85,10 @@ public sealed class ContentAddressedAssetStore : IAssetStore
         return Path.Combine(_rootPath, assetHash);
     }
 
+    // Assets written at or after keepWrittenAfterUtc are kept even when unreferenced: they may
+    // belong to edits that have not been saved yet.
     public Task<int> CollectGarbageAsync(IReadOnlySet<string> referencedAssets,
+        DateTime? keepWrittenAfterUtc = null,
         CancellationToken cancellationToken = default) => Task.Run(() =>
     {
         var deleted = 0;
@@ -91,6 +99,7 @@ public sealed class ContentAddressedAssetStore : IAssetStore
             if (name.StartsWith('.') || referencedAssets.Contains(name)) continue;
             try
             {
+                if (keepWrittenAfterUtc is { } cutoff && File.GetLastWriteTimeUtc(path) >= cutoff) continue;
                 File.Delete(path);
                 deleted++;
             }

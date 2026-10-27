@@ -788,26 +788,9 @@ public sealed class SqliteDocumentRepository : IDocumentRepository
         await transaction.CommitAsync(cancellationToken);
     }
 
-    public async Task<IReadOnlySet<string>> GetReferencedAssetHashesAsync(
-        CancellationToken cancellationToken = default)
-    {
-        await using var command = _connection.CreateCommand();
-        command.CommandText = "SELECT CAST(page_json AS BLOB) FROM pages;";
-        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
-        var hashes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        while (await reader.ReadAsync(cancellationToken))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var page = Deserialize<NotePage>(reader.GetFieldValue<byte[]>(0));
-            if (page?.ImportedLayer is { AssetHash.Length: > 0 } imported) hashes.Add(imported.AssetHash);
-            if (page is null) continue;
-            foreach (var image in page.Objects.OfType<ImageObject>())
-                if (!string.IsNullOrWhiteSpace(image.AssetHash)) hashes.Add(image.AssetHash);
-        }
-        return hashes;
-    }
-
-    public static async Task<IReadOnlySet<string>> GetReferencedAssetHashesFromBackupsAsync(
+    // Reads each database through its own read-only connection, so callers can scan the live
+    // library and its backups without holding the primary connection.
+    public static async Task<IReadOnlySet<string>> GetReferencedAssetHashesFromDatabasesAsync(
         IEnumerable<string> databasePaths, CancellationToken cancellationToken = default)
     {
         EnsureProviderInitialized();
@@ -847,6 +830,36 @@ public sealed class SqliteDocumentRepository : IDocumentRepository
         var result = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken));
         return string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase);
     }
+
+    // Runs the same check on a separate read-only connection, so it can run in the background
+    // while the primary connection keeps serving reads and saves.
+    public static async Task<bool> CheckIntegrityReadOnlyAsync(string databasePath,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureProviderInitialized();
+        await using var connection = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = databasePath,
+            Mode = SqliteOpenMode.ReadOnly,
+            Cache = SqliteCacheMode.Private,
+            Pooling = false
+        }.ToString());
+        try
+        {
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = "PRAGMA quick_check;";
+            var result = Convert.ToString(await command.ExecuteScalarAsync(cancellationToken));
+            return string.Equals(result, "ok", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (SqliteException exception) when (exception.SqliteErrorCode is SqliteCorrupt or SqliteNotADatabase)
+        {
+            return false;
+        }
+    }
+
+    private const int SqliteCorrupt = 11;
+    private const int SqliteNotADatabase = 26;
 
     public async Task<string> CreateBackupAsync(string backupDirectory, int retainedBackups = 7,
         CancellationToken cancellationToken = default)

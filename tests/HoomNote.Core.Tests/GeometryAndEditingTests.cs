@@ -72,6 +72,25 @@ public sealed class GeometryAndEditingTests
             SelectionTransformInputPolicy.ShouldRefreshForCommit(hasPreview, deltaX, deltaY));
     }
 
+    [Theory]
+    [InlineData(true, true, false, 3, true, true)]
+    [InlineData(true, true, false, 3, false, false)]
+    [InlineData(true, false, false, 3, true, false)]
+    [InlineData(false, true, false, 3, true, false)]
+    [InlineData(true, true, true, 3, true, false)]
+    [InlineData(true, true, false, 0, true, false)]
+    public void PenEraserOnSelectionDeletesItOnlyWhenTheEraserEndTouchesIt(
+        bool isPen,
+        bool isEraser,
+        bool readMode,
+        int deletableSelectedCount,
+        bool touchesSelection,
+        bool expected)
+    {
+        Assert.Equal(expected, PenEraserSelectionPolicy.ShouldDeleteSelection(
+            isPen, isEraser, readMode, deletableSelectedCount, touchesSelection));
+    }
+
     [Fact]
     public void EffectiveWorldWidth_TracksUniformAndNonUniformStrokeTransforms()
     {

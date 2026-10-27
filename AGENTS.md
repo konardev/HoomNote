@@ -11,6 +11,34 @@
   Package the app and ask the user to verify it.
 - When working in Python, use `uv`.
 
+## Full send in this repo
+
+In this repository, "full send" means "fix it, review it, and publish an OTA
+release". It replaces the global `full-send` skill's branch, PR, babysit, and
+merge steps. This repo has no PRs or CI; releases are committed straight to
+`main`. Keep the skill's Testing permission, Proof, and Asking the user rules.
+
+1. **Isolate.** If the main checkout has uncommitted changes, do the work in a
+   separate `git worktree` created from freshly fetched `origin/main`. Never
+   edit, stash, or build from the dirty checkout. Its release scripts may point
+   at unfinished work.
+2. **Finish the change** with the smallest fix that works.
+3. **Prove it.** Add focused tests where the behavior is testable, run the
+   validation commands below, and run the app when UI behavior needs it.
+4. **Review** with the `sol-loop` skill. Its base is `origin/main`.
+5. **Release metadata.** Bump the version and release notes as described below.
+6. **Validate** with the full test suite, Release build, and `git diff --check`.
+7. **Commit** `Release HoomNote <version>` on top of `origin/main` and push it
+   to `main` as a fast-forward (`git push origin HEAD:main`). Never force-push
+   `main`.
+8. **Publish.** A "full send" request is the explicit request to publish. Run
+   `publish-release.ps1` from the clean checkout, then complete every check in
+   "Verify publication", using the checkout you released from.
+9. **Sync the main checkout** with `git merge --ff-only origin/main` only when
+   it cannot touch uncommitted files. Otherwise leave it and tell the user.
+10. **Report** the release URL, installer URL, commit, test totals, proof,
+    review outcome, unsigned status, and each decision made for the user.
+
 ## Version and release metadata
 
 Before creating a release build:

@@ -1,4 +1,6 @@
-# HoomNote 0.8.6
+# HoomNote 0.8.7
 
-- Added Crop to the image right-click menu. Adjust the crop bars directly on the canvas, then confirm with the checkmark in place of the lock button. Cancel and undo/redo are supported.
-- Added Solid, Dotted, and Dashed line styles to pen and highlighter options. Styles are saved with notes and pen presets and retained in thumbnails and PDF/SVG exports.
+- Deleting a notebook, including one inside a folder, now removes it from the library right away instead of after a restart.
+- The library and folder contents show immediately when HoomNote starts. The library health check now runs in the background, and if it finds damage, HoomNote restores from the latest backup on the next start.
+- Touching a lasso or box selection with the eraser end of the pen now deletes everything selected in one step. Undo brings it all back. Touching outside the selection still erases strokes as before.
+- Fixed notebooks failing to open when HoomNote.exe is started directly, such as from the portable app.

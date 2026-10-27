@@ -224,6 +224,12 @@ public sealed partial class MainPage : Page
     private readonly SharedPdfDocumentCache _pdfDocuments = new();
     private readonly SemaphoreSlim _saveGate = new(1, 1);
     private string? _backupDirectory;
+    private string? _databasePath;
+    // One unused-asset sweep at a time across every window in this process.
+    private static readonly SemaphoreSlim AssetCleanupGate = new(1, 1);
+    // Unsaved edits can reference an image that is not in the database yet. The sweep keeps
+    // any asset written this recently so it can never remove one of those.
+    private static readonly TimeSpan RecentAssetGracePeriod = TimeSpan.FromHours(1);
     private DateTime _lastBackupUtc = DateTime.MinValue;
     private readonly SemaphoreSlim _documentLoadGate = new(1, 1);
     private CancellationTokenSource? _documentLoadCancellation;
@@ -438,9 +444,17 @@ public sealed partial class MainPage : Page
     private const float ContinuousPageGap = 28;
     private const int AdjacentPagePreviewLongEdge = 1536;
     private static long NotebookPagePreviewByteBudget => Math.Clamp(
-        (long)MemoryManager.AppMemoryUsageLimit / 48,
+        AppMemoryUsageLimitOrDefault() / 48,
         24L * 1024 * 1024,
         64L * 1024 * 1024);
+
+    // Windows can refuse this query (0x800702F7, "process is not part of a job") when
+    // HoomNote.exe is started directly instead of through the installer's launcher.
+    private static long AppMemoryUsageLimitOrDefault()
+    {
+        try { return (long)MemoryManager.AppMemoryUsageLimit; }
+        catch (System.Runtime.InteropServices.COMException) { return 64L * 1024 * 1024 * 48; }
+    }
     private const int NotebookPagePreviewLookAhead = 5;
 
     private SqliteDocumentRepository? _repository;
@@ -735,17 +749,25 @@ public sealed partial class MainPage : Page
         }
     }
 
-    private async Task InitializePrimaryRepositoryWithRecoveryAsync(
+    private static string IntegrityRecheckMarkerPath(string databasePath) => databasePath + ".check-failed";
+
+    // Returns true when the library's integrity was checked during startup. Otherwise the caller
+    // checks it in the background after the library is shown.
+    private async Task<bool> InitializePrimaryRepositoryWithRecoveryAsync(
         string databasePath,
         string backupDirectory)
     {
+        // A full integrity check reads the whole database file, which can take minutes on a large
+        // library. Only block startup on it after a background check found damage.
+        var recheckMarker = IntegrityRecheckMarkerPath(databasePath);
+        var verifyIntegrity = File.Exists(recheckMarker);
         _repository = new SqliteDocumentRepository(databasePath);
         try
         {
             await RunRepositoryAsync(async repository =>
             {
                 await repository.InitializeAsync();
-                if (!await repository.CheckIntegrityAsync())
+                if (verifyIntegrity && !await repository.CheckIntegrityAsync())
                     throw new InvalidDataException("The HoomNote library failed its SQLite integrity check.");
             });
         }
@@ -780,13 +802,37 @@ public sealed partial class MainPage : Page
                 if (!await repository.CheckIntegrityAsync())
                     throw new InvalidDataException("The restored HoomNote library failed its integrity check.");
             });
+            verifyIntegrity = true;
         }
 
+        if (verifyIntegrity) File.Delete(recheckMarker);
         if (Directory.Exists(backupDirectory))
             _lastBackupUtc = new DirectoryInfo(backupDirectory).EnumerateFiles("library-*.db")
                 .OrderByDescending(file => file.CreationTimeUtc)
                 .Select(file => file.CreationTimeUtc)
                 .FirstOrDefault();
+        return verifyIntegrity;
+    }
+
+    private async Task CheckLibraryIntegrityInBackgroundAsync(string databasePath)
+    {
+        try
+        {
+            var started = System.Diagnostics.Stopwatch.GetTimestamp();
+            var healthy = await Task.Run(() => SqliteDocumentRepository.CheckIntegrityReadOnlyAsync(databasePath));
+            DiagnosticsLog.Info("database.integrity_checked", ("ok", healthy),
+                ("elapsed_ms", MillisecondsSince(started)));
+            if (healthy) return;
+            // The next launch runs the blocking check, which quarantines the damaged file and
+            // restores the latest backup before anything else touches it.
+            await File.WriteAllTextAsync(IntegrityRecheckMarkerPath(databasePath), DateTime.UtcNow.ToString("O"));
+            ShowError("HoomNote found damage in its library.",
+                new InvalidDataException("Restart HoomNote to restore the library from its latest backup."));
+        }
+        catch (Exception exception)
+        {
+            DiagnosticsLog.Warning("database.integrity_check_failed_to_run", ("error", exception.Message));
+        }
     }
 
     private async Task<T> RunRepositoryAsync<T>(
@@ -858,6 +904,7 @@ public sealed partial class MainPage : Page
             nativeTouch.Frame -= OnNativeTouchFrame;
             nativeTouch.Frame += OnNativeTouchFrame;
         }
+        var integrityChecked = true;
         try
         {
             var root = Environment.GetEnvironmentVariable("HOOMNOTE_DATA_DIR");
@@ -930,7 +977,8 @@ public sealed partial class MainPage : Page
             _pageOcr = new WindowsPageOcrService(_assetStore, _pdfDocuments);
             var databasePath = Path.Combine(root, "library.db");
             _backupDirectory = Path.Combine(root, "backups");
-            await InitializePrimaryRepositoryWithRecoveryAsync(databasePath, _backupDirectory);
+            _databasePath = databasePath;
+            integrityChecked = await InitializePrimaryRepositoryWithRecoveryAsync(databasePath, _backupDirectory);
             // Home-card cache misses can deserialize and render a dense first page. Give that
             // disposable background work its own read connection so it cannot sit ahead of an
             // interactive notebook load or autosave in the primary repository queue.
@@ -958,12 +1006,18 @@ public sealed partial class MainPage : Page
             if (!startupPackageRequested) StatusText.Text = "Ready • autosave enabled";
             DiagnosticsLog.Info("main.loaded_complete", ("notebooks", _allDocuments.Count),
                 ("log_directory", DiagnosticsLog.LogDirectory));
+            if (_isPrimaryWindow && !integrityChecked)
+                _ = CheckLibraryIntegrityInBackgroundAsync(databasePath);
             if (_isPrimaryWindow)
                 _ = UpdateService.CheckForUpdatesAsync(XamlRoot, manual: false, PrepareForUpdateRestartAsync);
         }
         catch (Exception exception)
         {
             ShowError("HoomNote could not initialize its local library.", exception);
+            // Damage that only shows up when the library is read still needs the check, so the
+            // next launch can restore the latest backup.
+            if (_isPrimaryWindow && !integrityChecked && _databasePath is { } databasePath)
+                _ = CheckLibraryIntegrityInBackgroundAsync(databasePath);
         }
     }
 
@@ -2242,31 +2296,45 @@ public sealed partial class MainPage : Page
             }
         }
 
-        // Asset cleanup is maintenance after the notebook transaction. A locked backup or
-        // transient file error must not turn a successful delete into an application crash.
+        await PersistUserPreferencesAsync("Deleted notebook");
+        await RefreshLibraryAsync();
+        // Update the library first. The asset sweep reads every page in the library and its
+        // backups, which can take minutes on a large library.
+        _ = CollectUnusedAssetsAsync(target.Id);
+    }
+
+    private async Task CollectUnusedAssetsAsync(Guid deletedDocumentId)
+    {
+        if (_assetStore is not { } assetStore || _databasePath is not { } databasePath) return;
+        var backupDirectory = _backupDirectory;
+        await AssetCleanupGate.WaitAsync();
         try
         {
-            if (_assetStore is not null)
+            var keepWrittenAfterUtc = DateTime.UtcNow - RecentAssetGracePeriod;
+            // Maintenance after the notebook transaction: run it on a worker thread with its own
+            // read-only connections so it never blocks the UI or the repository queue.
+            var deleted = await Task.Run(async () =>
             {
-                var referencedAssets = new HashSet<string>(await RunRepositoryAsync(
-                    repository => repository.GetReferencedAssetHashesAsync()),
-                    StringComparer.OrdinalIgnoreCase);
-                if (_backupDirectory is not null && Directory.Exists(_backupDirectory))
-                {
-                    var backupAssets = await SqliteDocumentRepository.GetReferencedAssetHashesFromBackupsAsync(
-                        Directory.EnumerateFiles(_backupDirectory, "library-*.db"));
-                    referencedAssets.UnionWith(backupAssets);
-                }
-                await _assetStore.CollectGarbageAsync(referencedAssets);
-            }
+                var databases = new List<string> { databasePath };
+                if (backupDirectory is not null && Directory.Exists(backupDirectory))
+                    databases.AddRange(Directory.EnumerateFiles(backupDirectory, "library-*.db"));
+                var referencedAssets =
+                    await SqliteDocumentRepository.GetReferencedAssetHashesFromDatabasesAsync(databases);
+                return await assetStore.CollectGarbageAsync(referencedAssets, keepWrittenAfterUtc);
+            });
+            DiagnosticsLog.Info("assets.garbage_collected_after_delete",
+                ("document_id", deletedDocumentId), ("deleted", deleted));
         }
         catch (Exception exception)
         {
+            // A locked backup or transient file error must not affect a completed delete.
             DiagnosticsLog.Warning("assets.garbage_collection_failed_after_delete",
-                ("document_id", target.Id), ("error", exception.Message));
+                ("document_id", deletedDocumentId), ("error", exception.Message));
         }
-        await PersistUserPreferencesAsync("Deleted notebook");
-        await RefreshLibraryAsync();
+        finally
+        {
+            AssetCleanupGate.Release();
+        }
     }
 
     private async void OnMoveNotebookContextClick(object sender, RoutedEventArgs e)
@@ -5864,6 +5932,12 @@ public sealed partial class MainPage : Page
         if (point.PointerDeviceType == PointerDeviceType.Mouse &&
             !point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed &&
             !point.Properties.IsMiddleButtonPressed) return;
+        if (TryDeleteSelectionWithPenEraser(point))
+        {
+            DrawingSurface.Focus(FocusState.Pointer);
+            e.Handled = true;
+            return;
+        }
         // CanvasControl can leave keyboard focus in search or a native text editor. Explicitly
         // reclaiming it makes routed Ctrl+Z/Ctrl+Y reliable after any canvas interaction.
         DrawingSurface.Focus(FocusState.Pointer);
@@ -7452,6 +7526,22 @@ public sealed partial class MainPage : Page
                              StrokeGeometry.HitTest(stroke, point, tolerance))
             .OrderByDescending(stroke => stroke.ZIndex)
             .FirstOrDefault();
+    }
+
+    private bool TryDeleteSelectionWithPenEraser(PointerPoint point)
+    {
+        if (point.PointerDeviceType != PointerDeviceType.Pen || !point.Properties.IsEraser) return false;
+        if (!Matrix3x2.Invert(PageTransform(), out var screenToPage)) return false;
+        var pagePoint = Vector2.Transform(
+            new Vector2((float)point.Position.X, (float)point.Position.Y), screenToPage);
+        if (!PenEraserSelectionPolicy.ShouldDeleteSelection(
+                isPen: true,
+                isEraser: true,
+                _readMode,
+                SelectedCanvasObjects().Count(item => !item.IsLocked),
+                SelectionContainsInteraction(new PointD(pagePoint.X, pagePoint.Y)))) return false;
+        OnDeleteClick(this, new RoutedEventArgs());
+        return true;
     }
 
     private bool SelectionContainsInteraction(PointD point)

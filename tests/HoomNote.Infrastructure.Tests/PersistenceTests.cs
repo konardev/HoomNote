@@ -184,6 +184,79 @@ public sealed class PersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task AssetSweep_ReadsOpenLibraryAndKeepsRecentUnreferencedAssets()
+    {
+        var databasePath = Path.Combine(_root, "sweep-library.db");
+        await using var repository = new SqliteDocumentRepository(databasePath);
+        await repository.InitializeAsync();
+        var store = new ContentAddressedAssetStore(Path.Combine(_root, "sweep-assets"));
+        var referenced = await store.AddAsync(new MemoryStream("referenced"u8.ToArray()), ".png");
+        var oldUnused = await store.AddAsync(new MemoryStream("old unused"u8.ToArray()), ".png");
+        var recentUnused = await store.AddAsync(new MemoryStream("recent unused"u8.ToArray()), ".png");
+        var sweepStarted = DateTime.UtcNow;
+        File.SetLastWriteTimeUtc(store.GetPath(referenced), sweepStarted.AddHours(-3));
+        File.SetLastWriteTimeUtc(store.GetPath(oldUnused), sweepStarted.AddHours(-3));
+        var document = HoomNoteDocument.Create("Images");
+        AddPage(document).Objects.Add(new ImageObject
+        {
+            AssetHash = referenced,
+            Bounds = new RectD(0, 0, 10, 10)
+        });
+        await repository.SaveAsync(document);
+
+        // The primary connection stays open, as it does in the app.
+        var hashes = await SqliteDocumentRepository.GetReferencedAssetHashesFromDatabasesAsync([databasePath]);
+        var deleted = await store.CollectGarbageAsync(hashes, sweepStarted.AddHours(-1));
+
+        Assert.Equal(1, deleted);
+        Assert.True(File.Exists(store.GetPath(referenced)));
+        Assert.False(File.Exists(store.GetPath(oldUnused)));
+        Assert.True(File.Exists(store.GetPath(recentUnused)));
+    }
+
+    [Fact]
+    public async Task AssetStore_ReaddingStoredAssetMakesItRecent()
+    {
+        var store = new ContentAddressedAssetStore(Path.Combine(_root, "readd-assets"));
+        var hash = await store.AddAsync(new MemoryStream("image"u8.ToArray()), ".png");
+        File.SetLastWriteTimeUtc(store.GetPath(hash), DateTime.UtcNow.AddDays(-2));
+
+        var readdStarted = DateTime.UtcNow.AddSeconds(-1);
+        Assert.Equal(hash, await store.AddAsync(new MemoryStream("image"u8.ToArray()), ".png"));
+
+        Assert.True(File.GetLastWriteTimeUtc(store.GetPath(hash)) >= readdStarted);
+    }
+
+    [Fact]
+    public async Task ReadOnlyIntegrityCheck_PassesForOpenLibraryAndFailsForDamagedFile()
+    {
+        var databasePath = Path.Combine(_root, "integrity-library.db");
+        await using (var repository = new SqliteDocumentRepository(databasePath))
+        {
+            await repository.InitializeAsync();
+            var document = HoomNoteDocument.Create("Integrity");
+            for (var index = 0; index < 40; index++)
+                AddPage(document).Objects.Add(new RichTextObject
+                {
+                    Content = RichTextDocument.FromPlainText(new string('x', 2_000) + index)
+                });
+            await repository.SaveAsync(document);
+
+            Assert.True(await SqliteDocumentRepository.CheckIntegrityReadOnlyAsync(databasePath));
+            await repository.CreateBackupAsync(Path.Combine(_root, "integrity-backups"));
+        }
+
+        var damagedPath = Directory.EnumerateFiles(Path.Combine(_root, "integrity-backups"), "library-*.db").Single();
+        await using (var file = new FileStream(damagedPath, FileMode.Open, FileAccess.Write))
+        {
+            file.Position = 4096 * 2;
+            file.Write(Enumerable.Repeat((byte)0xA5, 4096 * 4).ToArray());
+        }
+
+        Assert.False(await SqliteDocumentRepository.CheckIntegrityReadOnlyAsync(damagedPath));
+    }
+
+    [Fact]
     public async Task Repository_SearchFindsZeroPageNotebookTitles()
     {
         await using var repository = new SqliteDocumentRepository(Path.Combine(_root, "title-search.db"));
