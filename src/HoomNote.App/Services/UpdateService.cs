@@ -30,8 +30,11 @@ public static class UpdateService
                 return;
             }
 
-            var manager = string.Equals(configuration.Value.Source, "github", StringComparison.OrdinalIgnoreCase)
-                ? new UpdateManager(new GithubSource(configuration.Value.Url, null, false))
+            var isGithub = string.Equals(configuration.Value.Source, "github", StringComparison.OrdinalIgnoreCase);
+            // GitHub's "latest/download" URLs are plain file downloads, so they are not subject to the
+            // anonymous API limit (60 requests/hour per IP) that GithubSource hits on shared networks.
+            var manager = isGithub
+                ? new UpdateManager(new SimpleWebSource(GithubLatestDownloadUrl(configuration.Value.Url)))
                 : new UpdateManager(configuration.Value.Url);
             if (!manager.IsInstalled)
             {
@@ -42,7 +45,17 @@ public static class UpdateService
             }
 
             DiagnosticsLog.Info("update.check_started", ("manual", manual));
-            var update = await manager.CheckForUpdatesAsync();
+            UpdateInfo? update;
+            try
+            {
+                update = await manager.CheckForUpdatesAsync();
+            }
+            catch (Exception exception) when (isGithub)
+            {
+                DiagnosticsLog.Error("update.latest_download_failed", exception, ("manual", manual));
+                manager = new UpdateManager(new GithubSource(configuration.Value.Url, null, false));
+                update = await manager.CheckForUpdatesAsync();
+            }
             if (update is null)
             {
                 DiagnosticsLog.Info("update.none_available", ("manual", manual));
@@ -104,7 +117,7 @@ public static class UpdateService
             DiagnosticsLog.Error("update.failed", exception, ("manual", manual));
             if (manual)
                 await ShowMessageAsync(xamlRoot, "Update check failed",
-                    "HoomNote could not contact the update service. Your notes and current installation were not changed.");
+                    "HoomNote could not reach the update server. Check your internet connection and try again in a few minutes. Your notes and current installation were not changed.");
         }
         finally
         {
@@ -137,6 +150,9 @@ public static class UpdateService
             return null;
         }
     }
+
+    internal static string GithubLatestDownloadUrl(string repositoryUrl) =>
+        repositoryUrl.TrimEnd('/') + "/releases/latest/download";
 
     private static string InferSource(string url) =>
         Uri.TryCreate(url, UriKind.Absolute, out var uri) &&
