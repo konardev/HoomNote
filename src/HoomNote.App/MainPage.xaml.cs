@@ -5751,6 +5751,12 @@ public sealed partial class MainPage : Page
 
     private void DrawShape(CanvasDrawingSession drawingSession, ShapeObject shape)
     {
+        if (shape.LinePattern != InkLinePattern.Solid)
+        {
+            foreach (var outline in ShapePatternGeometry.ToPatternStrokes(shape))
+                DrawInk(drawingSession, outline);
+            return;
+        }
         var color = ParseColor(shape.StrokeColor);
         var bounds = shape.Bounds;
         switch (shape.Shape)
@@ -7603,7 +7609,6 @@ public sealed partial class MainPage : Page
     private void OnShapeSnapTimerTick(DispatcherQueueTimer sender, object args)
     {
         if (!_isPointerDown || _gestureTool != EditorTool.Pen || !SmartShapesToggle.IsOn ||
-            (_gestureInkStyle ?? CurrentInkStyle()).LinePattern != InkLinePattern.Solid ||
             _activeInk.Count < 4)
         {
             if (!_isPointerDown || _gestureTool != EditorTool.Pen || !SmartShapesToggle.IsOn)
@@ -7623,7 +7628,6 @@ public sealed partial class MainPage : Page
     {
         if (_document is null || _page is null || _activeInk.Count == 0) return;
         if (_gestureTool == EditorTool.Pen && SmartShapesToggle.IsOn &&
-            (_gestureInkStyle ?? CurrentInkStyle()).LinePattern == InkLinePattern.Solid &&
             (_heldShapeRecognition ?? ShapeRecognizer.RecognizeDetailed(
                 _activeInk, deliberateShapeGesture, snapToClosest: deliberateShapeGesture)) is { } recognition)
         {
@@ -7659,6 +7663,7 @@ public sealed partial class MainPage : Page
                 new PointD(_activeInk.Max(point => point.X), _activeInk.Max(point => point.Y))),
             StrokeColor = style.Color,
             StrokeWidth = style.Width,
+            LinePattern = style.Normalize().LinePattern,
             ZIndex = zIndex
         };
     }
@@ -7711,6 +7716,7 @@ public sealed partial class MainPage : Page
             EndPoint = directional ? end : new PointD(bounds.Right, bounds.Bottom),
             StrokeColor = _inkColor,
             StrokeWidth = (float)StrokeWidthSlider.Value,
+            LinePattern = CurrentLinePattern(EditorTool.Pen),
             ZIndex = zIndex
         };
     }

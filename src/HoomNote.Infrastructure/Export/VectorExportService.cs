@@ -13,9 +13,13 @@ public sealed class VectorExportService(IAssetStore assetStore) : IVectorExportS
 {
     private const double PointsPerDip = 72d / 96d;
 
-    private static IEnumerable<CanvasObject> ExpandInk(CanvasObject item) => item is InkStrokeObject stroke
-        ? InkPatternGeometry.Expand(stroke)
-        : [item];
+    private static IEnumerable<CanvasObject> ExpandInk(CanvasObject item) => item switch
+    {
+        InkStrokeObject stroke => InkPatternGeometry.Expand(stroke),
+        ShapeObject { LinePattern: not InkLinePattern.Solid } shape =>
+            ShapePatternGeometry.ToPatternStrokes(shape).SelectMany(InkPatternGeometry.Expand),
+        _ => [item]
+    };
 
     public Task<ExportResult> ExportAsync(HoomNoteDocument document, string destinationPath,
         VectorExportFormat format, CancellationToken cancellationToken = default) => format switch

@@ -1,4 +1,5 @@
-# HoomNote 0.8.8
+# HoomNote 0.8.9
 
-- Fixed "Update check failed" appearing on some networks, such as school or hospital Wi-Fi. HoomNote now downloads updates directly from the release page, which does not hit GitHub's hourly limit for shared connections.
-- The update error message now suggests checking the connection and trying again in a few minutes.
+- Dotted and dashed line styles now work with straight lines and shapes. Lines, rectangles, stars, and circles drawn with the Shape tool use the pen's current line style.
+- Pen smart shapes (hold at the end of a stroke to snap) now also work with dotted and dashed lines, and keep the line style after snapping.
+- Dotted and dashed shapes keep their pattern in page thumbnails and in PDF and SVG exports.

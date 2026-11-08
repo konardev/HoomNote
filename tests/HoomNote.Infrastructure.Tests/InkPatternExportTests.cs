@@ -38,6 +38,37 @@ public sealed class InkPatternExportTests : IDisposable
         Assert.True(pdf.GetPage(1).Paths.Count >= count);
     }
 
+    [Theory]
+    [InlineData(InkLinePattern.Dotted, "circle", 6)]
+    [InlineData(InkLinePattern.Dashed, "path", 3)]
+    public async Task PatternedShapesExportWithGaps(InkLinePattern pattern, string element, int count)
+    {
+        var store = new ContentAddressedAssetStore(Path.Combine(_root, "assets"));
+        var document = HoomNoteDocument.Create("Shape pattern export");
+        document.Pages.Add(new NotePage { Objects = [new ShapeObject
+        {
+            Shape = ShapeKind.Line, Bounds = new RectD(10, 10, 30, 1),
+            StartPoint = new PointD(10, 10), EndPoint = new PointD(40, 10),
+            StrokeWidth = 2, LinePattern = pattern
+        }] });
+        var exporter = new VectorExportService(store);
+        var svgPath = Path.Combine(_root, "shape-patterns.svg");
+        Assert.Empty((await exporter.ExportAsync(document, svgPath, VectorExportFormat.Svg)).Warnings);
+        var svg = XDocument.Load(svgPath);
+        XNamespace ns = "http://www.w3.org/2000/svg";
+        Assert.Equal(count, svg.Root!.Elements(ns + element).Count());
+        Assert.DoesNotContain(svg.Root!.Elements(ns + "line"),
+            line => (string?)line.Attribute("stroke") == "#F4F7FB");
+        var pdfPath = Path.Combine(_root, "shape-patterns.pdf");
+        Assert.Empty((await exporter.ExportAsync(document, pdfPath, VectorExportFormat.Pdf)).Warnings);
+        using var pdf = UglyToad.PdfPig.PdfDocument.Open(pdfPath);
+        Assert.True(pdf.GetPage(1).Paths.Count >= count);
+
+        CanvasObject shape = document.Pages[0].Objects[0];
+        var copy = JsonSerializer.Deserialize<CanvasObject>(JsonSerializer.Serialize(shape, HoomNoteJson.Options), HoomNoteJson.Options);
+        Assert.Equal(pattern, Assert.IsType<ShapeObject>(copy).LinePattern);
+    }
+
     [Fact]
     public async Task PatternsSurviveSettingsAndDocumentSerialization()
     {

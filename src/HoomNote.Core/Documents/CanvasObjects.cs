@@ -173,6 +173,7 @@ public sealed record ShapeObject : CanvasObject
     public string StrokeColor { get; init; } = "#F4F7FB";
     public string? FillColor { get; init; }
     public float StrokeWidth { get; init; } = 2;
+    public InkLinePattern LinePattern { get; init; }
     public override RectD LocalBounds => Bounds.Inflate(StrokeWidth / 2d);
 }
 

@@ -180,7 +180,7 @@ public sealed class PageThumbnailRenderer(IAssetStore assetStore, SharedPdfDocum
                 DrawText(session, text);
                 break;
             case ShapeObject shape:
-                DrawShape(session, shape, roundStyle);
+                DrawShape(session, shape, roundStyle, darkSurface, renderScale, cancellationToken);
                 break;
             case ImageObject image when images.TryGetValue(image.AssetHash, out var bitmap):
                 var destination = ImageLayout.Destination(
@@ -325,7 +325,8 @@ public sealed class PageThumbnailRenderer(IAssetStore assetStore, SharedPdfDocum
             ParseColor(run?.Color ?? "#F4F7FB"), format);
     }
 
-    private static void DrawShape(CanvasDrawingSession session, ShapeObject shape, CanvasStrokeStyle roundStyle)
+    private static void DrawShape(CanvasDrawingSession session, ShapeObject shape, CanvasStrokeStyle roundStyle,
+        bool darkSurface, float renderScale, CancellationToken cancellationToken)
     {
         var color = ParseColor(shape.StrokeColor);
         var bounds = shape.Bounds;
@@ -338,6 +339,12 @@ public sealed class PageThumbnailRenderer(IAssetStore assetStore, SharedPdfDocum
             else if (shape.Shape is ShapeKind.Square or ShapeKind.Rectangle or ShapeKind.RoundedRectangle)
                 session.FillRectangle((float)bounds.X, (float)bounds.Y, (float)bounds.Width,
                     (float)bounds.Height, fillColor);
+        }
+        if (shape.LinePattern != InkLinePattern.Solid)
+        {
+            foreach (var outline in ShapePatternGeometry.ToPatternStrokes(shape))
+                DrawInk(session, outline, roundStyle, darkSurface, renderScale, cancellationToken);
+            return;
         }
         switch (shape.Shape)
         {
