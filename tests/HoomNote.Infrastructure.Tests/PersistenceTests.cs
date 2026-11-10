@@ -92,6 +92,63 @@ public sealed class PersistenceTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Repository_PersistsPageReorderWhenNoPageContentIsDirty()
+    {
+        await using var repository = new SqliteDocumentRepository(Path.Combine(_root, "reorder.db"));
+        await repository.InitializeAsync();
+        var document = HoomNoteDocument.Create("Reordered");
+        var first = AddPage(document);
+        var second = AddPage(document);
+        var third = AddPage(document);
+        await repository.SaveAsync(document);
+
+        // A drag reorder changes only page positions, so the app saves with no dirty pages.
+        document.Pages.Clear();
+        document.Pages.AddRange([third, first, second]);
+        document.Sections[0].PageIds.Clear();
+        document.Sections[0].PageIds.AddRange([third.Id, first.Id, second.Id]);
+        await repository.SavePagesAsync(document, []);
+
+        var loaded = await repository.LoadAsync(document.Id);
+
+        Assert.NotNull(loaded);
+        Assert.Equal([third.Id, first.Id, second.Id], loaded.Pages.Select(page => page.Id));
+
+        // Reopening a notebook loads page shells, so a later reorder moves unloaded pages.
+        var reopened = await repository.LoadForEditingAsync(document.Id);
+        Assert.NotNull(reopened);
+        Assert.Equal([third.Id, first.Id, second.Id], reopened.Pages.Select(page => page.Id));
+        reopened.Pages.Reverse();
+        foreach (var section in reopened.Sections) section.PageIds.Reverse();
+        await repository.SavePagesAsync(reopened, []);
+
+        var reopenedAgain = await repository.LoadForEditingAsync(document.Id);
+        Assert.NotNull(reopenedAgain);
+        Assert.Equal([second.Id, first.Id, third.Id], reopenedAgain.Pages.Select(page => page.Id));
+    }
+
+    [Fact]
+    public async Task Repository_PersistsInsertedPagePositionAmongUnchangedPages()
+    {
+        await using var repository = new SqliteDocumentRepository(Path.Combine(_root, "insert-order.db"));
+        await repository.InitializeAsync();
+        var document = HoomNoteDocument.Create("Inserted");
+        var first = AddPage(document);
+        var second = AddPage(document);
+        await repository.SaveAsync(document);
+
+        var inserted = new NotePage { Title = "Inserted" };
+        document.Pages.Insert(0, inserted);
+        document.Sections[0].PageIds.Insert(0, inserted.Id);
+        await repository.SavePagesAsync(document, [inserted.Id]);
+
+        var loaded = await repository.LoadAsync(document.Id);
+
+        Assert.NotNull(loaded);
+        Assert.Equal([inserted.Id, first.Id, second.Id], loaded.Pages.Select(page => page.Id));
+    }
+
+    [Fact]
     public async Task Repository_LoadFirstPageIncludesIncrementalInkForFreshCoverThumbnail()
     {
         await using var repository = new SqliteDocumentRepository(

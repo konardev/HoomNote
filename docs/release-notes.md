@@ -1,5 +1,3 @@
-# HoomNote 0.8.9
+# HoomNote 0.8.10
 
-- Dotted and dashed line styles now work with straight lines and shapes. Lines, rectangles, stars, and circles drawn with the Shape tool use the pen's current line style.
-- Pen smart shapes (hold at the end of a stroke to snap) now also work with dotted and dashed lines, and keep the line style after snapping.
-- Dotted and dashed shapes keep their pattern in page thumbnails and in PDF and SVG exports.
+- Fixed page order not being saved. Pages you drag to a new spot, and new pages you add between existing pages, now stay where you put them after you switch notes or restart HoomNote. Page order that reverted before this update needs to be set once more.

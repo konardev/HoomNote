@@ -517,7 +517,8 @@ public sealed class SqliteDocumentRepository : IDocumentRepository
         CancellationToken cancellationToken)
     {
         document.UpdatedAt = DateTimeOffset.UtcNow;
-        var persistedVersions = await LoadPersistedPageVersionsAsync(document.Id, cancellationToken);
+        var (persistedVersions, persistedOrdinals) =
+            await LoadPersistedPageVersionsAsync(document.Id, cancellationToken);
         var pages = document.Pages.Select((page, ordinal) => new
         {
             Page = page,
@@ -581,7 +582,23 @@ public sealed class SqliteDocumentRepository : IDocumentRepository
             {
                 var page = pages[index];
                 if (dirtyPageIds is not null && !dirtyPageIds.Contains(page.Id) &&
-                    persistedVersions.ContainsKey(page.Id)) continue;
+                    persistedVersions.ContainsKey(page.Id))
+                {
+                    // Reordering or inserting pages moves clean pages too. Their content is
+                    // unchanged, but their stored position must follow the new order.
+                    if (persistedOrdinals[page.Id] != page.Ordinal)
+                    {
+                        await using var moveCommand = _connection.CreateCommand();
+                        moveCommand.Transaction = transaction;
+                        moveCommand.CommandText =
+                            "UPDATE pages SET ordinal = $ordinal WHERE document_id = $document AND id = $id;";
+                        moveCommand.Parameters.AddWithValue("$ordinal", page.Ordinal);
+                        moveCommand.Parameters.AddWithValue("$document", document.Id.ToString("D"));
+                        moveCommand.Parameters.AddWithValue("$id", page.Id.ToString("D"));
+                        await moveCommand.ExecuteNonQueryAsync(cancellationToken);
+                    }
+                    continue;
+                }
                 if (!serializedPages.TryGetValue(page.Id, out var pageJson))
                 {
                     await using var orderCommand = _connection.CreateCommand();
@@ -665,25 +682,28 @@ public sealed class SqliteDocumentRepository : IDocumentRepository
         await searchCommand.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private async Task<Dictionary<Guid, DateTimeOffset>> LoadPersistedPageVersionsAsync(Guid documentId,
-        CancellationToken cancellationToken)
+    private async Task<(Dictionary<Guid, DateTimeOffset> Versions, Dictionary<Guid, long> Ordinals)>
+        LoadPersistedPageVersionsAsync(Guid documentId, CancellationToken cancellationToken)
     {
         await using var command = _connection.CreateCommand();
         command.CommandText = """
             SELECT p.id, p.updated_utc,
-                   EXISTS(SELECT 1 FROM ink_append_journal j WHERE j.page_id = p.id)
+                   EXISTS(SELECT 1 FROM ink_append_journal j WHERE j.page_id = p.id),
+                   p.ordinal
             FROM pages p WHERE p.document_id = $id;
             """;
         command.Parameters.AddWithValue("$id", documentId.ToString("D"));
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var versions = new Dictionary<Guid, DateTimeOffset>();
+        var ordinals = new Dictionary<Guid, long>();
         while (await reader.ReadAsync(cancellationToken))
         {
             if (!Guid.TryParse(reader.GetString(0), out var pageId) ||
                 !DateTimeOffset.TryParse(reader.GetString(1), out var updatedAt)) continue;
             versions[pageId] = reader.GetBoolean(2) ? DateTimeOffset.MinValue : updatedAt;
+            ordinals[pageId] = reader.GetInt64(3);
         }
-        return versions;
+        return (versions, ordinals);
     }
 
     public async Task<bool> SaveInkAppendsAsync(HoomNoteDocument document,
